@@ -1,0 +1,108 @@
+package main
+
+import (
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/widget"
+	"fyne.io/fyne/v2/data/binding"
+	"tinygo.org/x/bluetooth"
+	"strconv"	
+	"os"
+)
+
+var (
+	adapter = bluetooth.DefaultAdapter
+
+	heartRateServiceUUID        = bluetooth.ServiceUUIDHeartRate
+	heartRateCharacteristicUUID = bluetooth.CharacteristicUUIDHeartRateMeasurement
+)
+
+func main() {
+	a := app.New()
+	w := a.NewWindow("Heart Monitor")
+
+	log := binding.NewString()
+	log.Set("starting...")
+	log_label := widget.NewLabelWithData(log)
+	
+	go func(){
+	
+		// Enable BLE interface.
+		must("enable BLE stack", adapter.Enable())
+	
+		ch := make(chan bluetooth.ScanResult, 1)
+	
+		// Start scanning.
+		err := adapter.Scan(func(adapter *bluetooth.Adapter, result bluetooth.ScanResult) {
+			log.Set("found device:" + result.Address.String() + " " + result.LocalName())
+			if result.Address.String() == connectAddress() {
+				adapter.StopScan()
+				ch <- result
+			}
+		})
+	
+		var device bluetooth.Device
+		select {
+		case result := <-ch:
+			device, err = adapter.Connect(result.Address, bluetooth.ConnectionParams{})
+			if err != nil {
+				log.Set(err.Error())
+				return
+			}
+			log.Set("connected to " + result.Address.String())
+		}
+	
+		// get services
+		log.Set("discovering services/characteristics")
+		srvcs, err := device.DiscoverServices([]bluetooth.UUID{heartRateServiceUUID})
+		must("discover services", err)
+
+		if len(srvcs) == 0 {
+			panic("could not find heart rate service")
+		}
+	
+		srvc := srvcs[0]
+
+		log.Set("found service" + srvc.UUID().String())
+
+		chars, err := srvc.DiscoverCharacteristics([]bluetooth.UUID{heartRateCharacteristicUUID})
+		if err != nil {
+			log.Set("err")
+		}
+
+		if len(chars) == 0 {
+			panic("could not find heart rate characteristic")
+		}
+		
+		char := chars[0]
+		log.Set("found characteristic" + char.UUID().String())
+
+		char.EnableNotifications(func(buf []byte) {
+			log.Set("data: " + strconv.FormatUint(uint64(uint8(buf[1])),10))
+		})
+
+		select {}
+
+	}()
+	
+	w.SetContent(log_label)
+	w.ShowAndRun()
+}
+
+func must(action string, err error) {
+	if err != nil {
+		panic("failed to " + action + ": " + err.Error())
+	}
+}
+
+func connectAddress() string {
+	if len(os.Args) < 2 {
+		println("usage: heartrate-monitor [address]")
+		os.Exit(1)
+	}
+
+	// look for device with specific name
+	address := os.Args[1]
+
+	return address
+}
+
